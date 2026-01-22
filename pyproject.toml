@@ -15,6 +15,7 @@ pydantic-settings = "^2.2.1"
 structlog = "^24.1.0"
 requests = "^2.31.0"
 sentence-transformers = "^2.6.1"
+psycopg = { version = "^3.1.18", extras = ["binary"] }
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
