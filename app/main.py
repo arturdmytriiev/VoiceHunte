@@ -5,20 +5,25 @@ import os
 import shutil
 import tempfile
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
+import anyio
+import requests
 import structlog
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.agent import CallState, Intent, run_agent
 from app.core.config import settings
 from app.core.logging import call_id_ctx, configure_logging, request_id_ctx
 from app.db.conversations import ConversationStore
+from app.db.pool import close_pool, get_pool, init_pool
 from app.stt.whisper import SUPPORTED_LANGUAGES, transcribe
 from app.tts import stream_tts
+from app.twilio.models import sanitize_optional_payload, sanitize_text_payload
 from app.twilio.webhooks import (
     handle_call_status,
     handle_incoming_call,
@@ -28,7 +33,17 @@ from app.twilio.webhooks import (
 configure_logging(settings.log_level)
 logger = structlog.get_logger(__name__)
 
-app = FastAPI(title=settings.app_name)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_pool()
+    try:
+        yield
+    finally:
+        close_pool()
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 store = ConversationStore()
 
 LanguageCode = Literal["sk", "en", "ru", "uk"]
@@ -38,6 +53,16 @@ class TextRequest(BaseModel):
     text: str = Field(..., min_length=1)
     language: LanguageCode
     call_id: str | None = None
+
+    @field_validator("text")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        return sanitize_text_payload(value, max_length=4000)
+
+    @field_validator("call_id")
+    @classmethod
+    def validate_call_id(cls, value: str | None) -> str | None:
+        return sanitize_optional_payload(value, max_length=128)
 
 
 class MVPResponse(BaseModel):
@@ -184,6 +209,11 @@ class TTSRequest(BaseModel):
     response_format: str = "mp3"
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
 
+    @field_validator("text")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        return sanitize_text_payload(value, max_length=4000)
+
 
 @app.post("/tts/stream")
 async def tts_stream(payload: TTSRequest) -> StreamingResponse:
@@ -228,16 +258,11 @@ async def twilio_incoming(request: Request) -> Response:
 
 
 @app.post("/twilio/voice")
-async def twilio_voice(
-    request: Request,
-    SpeechResult: str = Form(None),
-    CallSid: str = Form(...),
-    Confidence: float = Form(None),
-) -> Response:
+async def twilio_voice(request: Request) -> Response:
     """
     Twilio webhook for voice input processing.
     """
-    return await handle_voice_input(request, SpeechResult, CallSid, Confidence)
+    return await handle_voice_input(request)
 
 
 @app.post("/twilio/status")
@@ -257,6 +282,54 @@ async def twilio_tts(call_id: str, filename: str) -> Response:
     if not tts_path.exists():
         raise HTTPException(status_code=404, detail="TTS file not found")
     return FileResponse(tts_path, media_type="audio/mpeg")
+
+
+@app.get("/ready")
+async def ready() -> JSONResponse:
+    checks: dict[str, dict[str, str]] = {}
+    status_code = 200
+
+    def set_failure(name: str, error: Exception) -> None:
+        nonlocal status_code
+        checks[name] = {"status": "error", "error": str(error)}
+        status_code = 503
+
+    async def run_check(name: str, func) -> None:
+        try:
+            async with anyio.fail_after(1.5):
+                await anyio.to_thread.run_sync(func)
+            checks[name] = {"status": "ok"}
+        except Exception as exc:  # noqa: BLE001 - narrow errors not needed for health
+            set_failure(name, exc)
+
+    def check_postgres() -> None:
+        pool = get_pool()
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+
+    def check_qdrant() -> None:
+        url = f"{settings.qdrant_url.rstrip('/')}/collections"
+        response = requests.get(url, timeout=1.5)
+        response.raise_for_status()
+
+    def check_openai() -> None:
+        if not settings.openai_api_key:
+            raise RuntimeError("openai_api_key missing")
+        response = requests.get(
+            "https://api.openai.com/v1/models",
+            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            timeout=1.5,
+        )
+        response.raise_for_status()
+
+    await run_check("postgres", check_postgres)
+    await run_check("qdrant", check_qdrant)
+    await run_check("openai", check_openai)
+
+    overall = "ok" if status_code == 200 else "error"
+    return JSONResponse(status_code=status_code, content={"status": overall, "checks": checks})
 
 
 @app.on_event("startup")

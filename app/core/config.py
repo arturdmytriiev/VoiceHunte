@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     postgres_dsn: str = "postgresql+psycopg://voicehunte:voicehunte@localhost:5432/voicehunte"
+    postgres_pool_size: int = 5
+    postgres_pool_max_overflow: int = 5
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None
     openai_api_key: str | None = None

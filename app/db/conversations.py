@@ -2,16 +2,33 @@ from __future__ import annotations
 
 from typing import Any
 
-from psycopg import connect
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
+from psycopg_pool import ConnectionPool
 
 from app.core.config import settings
+from app.db.pool import get_pool
 
 
 class ConversationStore:
-    def __init__(self, dsn: str | None = None) -> None:
+    def __init__(
+        self,
+        dsn: str | None = None,
+        pool: ConnectionPool | None = None,
+    ) -> None:
         self.dsn = dsn or settings.postgres_dsn
+        if pool is not None:
+            self.pool = pool
+        elif dsn is not None:
+            self.pool = ConnectionPool(
+                conninfo=dsn,
+                min_size=1,
+                max_size=1,
+                kwargs={"row_factory": dict_row},
+                check=ConnectionPool.check_connection,
+            )
+        else:
+            self.pool = get_pool()
         self._ensure_tables()
 
     def create_turn(
@@ -114,7 +131,7 @@ class ConversationStore:
         return int(row["next_turn_id"])
 
     def _get_conn(self):
-        return connect(self.dsn, row_factory=dict_row)
+        return self.pool.connection()
 
     def _ensure_tables(self) -> None:
         with self._get_conn() as conn:
