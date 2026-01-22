@@ -16,12 +16,14 @@ from pydantic import BaseModel, Field
 from app.agent import CallState, Intent, run_agent
 from app.core.config import settings
 from app.core.logging import call_id_ctx, configure_logging, request_id_ctx
+from app.db.conversations import ConversationStore
 from app.stt.whisper import SUPPORTED_LANGUAGES, transcribe
 
 configure_logging(settings.log_level)
 logger = structlog.get_logger(__name__)
 
 app = FastAPI(title=settings.app_name)
+store = ConversationStore()
 
 LanguageCode = Literal["sk", "en", "ru", "uk"]
 
@@ -87,6 +89,10 @@ def _build_response(state: CallState, transcript: str) -> MVPResponse:
     )
 
 
+def _serialize_tool_calls(state: CallState) -> list[dict[str, object]]:
+    return [result.model_dump() for result in state.tool_results]
+
+
 @app.post("/mvp/audio", response_model=MVPResponse)
 async def mvp_audio(
     file: UploadFile = File(...),
@@ -99,23 +105,47 @@ async def mvp_audio(
             content={"detail": "Unsupported language"},
         )
 
+    resolved_call_id = call_id or call_id_ctx.get() or str(uuid.uuid4())
+    turn_id = store.next_turn_id(resolved_call_id)
+    audio_dir = Path("storage/audio") / resolved_call_id
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = audio_dir / f"input_{turn_id}.wav"
+
     suffix = Path(file.filename or "audio").suffix
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
         shutil.copyfileobj(file.file, tmp_file)
         temp_path = tmp_file.name
+    shutil.copy(temp_path, audio_path)
 
     try:
         stt_result = transcribe(temp_path, language=language, mode="transcribe")
     finally:
         os.unlink(temp_path)
 
-    resolved_call_id = call_id or call_id_ctx.get() or str(uuid.uuid4())
     call_state = CallState(
         call_id=resolved_call_id,
         language=stt_result.language or language,
         last_user_text=stt_result.text,
     )
     call_state = run_agent(call_state)
+
+    store.create_turn(
+        call_id=resolved_call_id,
+        language=call_state.language,
+        user_text=stt_result.text,
+        intent=call_state.intent.value if call_state.intent else None,
+        tool_calls=_serialize_tool_calls(call_state),
+        assistant_text=call_state.final_answer.answer_text
+        if call_state.final_answer
+        else None,
+        turn_id=turn_id,
+    )
+    store.record_audio(
+        call_id=resolved_call_id,
+        turn_id=turn_id,
+        path=str(audio_path),
+        kind="input",
+    )
     return _build_response(call_state, stt_result.text)
 
 
@@ -128,6 +158,16 @@ async def mvp_text(payload: TextRequest) -> MVPResponse:
         last_user_text=payload.text,
     )
     call_state = run_agent(call_state)
+    store.create_turn(
+        call_id=resolved_call_id,
+        language=call_state.language,
+        user_text=payload.text,
+        intent=call_state.intent.value if call_state.intent else None,
+        tool_calls=_serialize_tool_calls(call_state),
+        assistant_text=call_state.final_answer.answer_text
+        if call_state.final_answer
+        else None,
+    )
     return _build_response(call_state, payload.text)
 
 
