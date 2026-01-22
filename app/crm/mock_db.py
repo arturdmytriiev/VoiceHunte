@@ -20,7 +20,8 @@ from app.crm.base import (
 class CRMPostgresMock(CRMAdapter):
     def __init__(self, dsn: str | None = None) -> None:
         self.dsn = dsn or settings.postgres_dsn
-        self._ensure_tables()
+        if settings.db_auto_create:
+            self._ensure_tables()
 
     def create_reservation(self, payload: ReservationCreate) -> ReservationRecord:
         query = """

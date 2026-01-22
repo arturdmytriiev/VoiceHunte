@@ -29,7 +29,8 @@ class ConversationStore:
             )
         else:
             self.pool = get_pool()
-        self._ensure_tables()
+        if settings.db_auto_create:
+            self._ensure_tables()
 
     def create_turn(
         self,

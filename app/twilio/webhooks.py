@@ -40,12 +40,18 @@ async def handle_incoming_call(request: Request) -> Response:
     """
     form_data = await request.form()
     if not verify_twilio_signature(request, form_data):
-        return Response(status_code=403)
+        twiml = create_twiml_response(say="We could not verify this request.")
+        return Response(
+            content=twiml,
+            media_type="application/xml",
+            status_code=403,
+        )
 
     try:
         payload = TwilioIncomingCallPayload.model_validate(form_data)
     except ValidationError:
-        return Response(status_code=422)
+        twiml = create_twiml_response(say="Invalid request.")
+        return Response(content=twiml, media_type="application/xml", status_code=422)
     call_sid = payload.CallSid
     from_number = payload.From
     to_number = payload.To
@@ -94,7 +100,8 @@ async def handle_voice_input(
     try:
         payload = TwilioVoicePayload.model_validate(form_data)
     except ValidationError:
-        return Response(status_code=422)
+        twiml = create_twiml_response(say="Invalid request.")
+        return Response(content=twiml, media_type="application/xml", status_code=422)
 
     logger.info(
         "voice_input",
@@ -198,12 +205,18 @@ async def handle_call_status(request: Request) -> Response:
     """
     form_data = await request.form()
     if not verify_twilio_signature(request, form_data):
-        return Response(status_code=403)
+        twiml = create_twiml_response(say="We could not verify this request.")
+        return Response(
+            content=twiml,
+            media_type="application/xml",
+            status_code=403,
+        )
 
     try:
         payload = TwilioCallStatusPayload.model_validate(form_data)
     except ValidationError:
-        return Response(status_code=422)
+        twiml = create_twiml_response(say="Invalid request.")
+        return Response(content=twiml, media_type="application/xml", status_code=422)
     call_sid = payload.CallSid
     call_status = payload.CallStatus
 

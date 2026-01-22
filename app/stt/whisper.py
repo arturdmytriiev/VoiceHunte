@@ -11,6 +11,8 @@ from typing import Any, Iterable
 import requests
 
 from app.core.config import settings
+from app.core.errors import ExternalAPIError
+from app.core.retry import retryable
 
 SUPPORTED_LANGUAGES = {"sk", "en", "ru", "uk"}
 SUPPORTED_MODES = {"transcribe", "translate"}
@@ -89,6 +91,43 @@ def _request_whisper(
     endpoint = "transcriptions" if mode == "transcribe" else "translations"
     response_format = "verbose_json" if mode == "transcribe" else "json"
 
+    response = _post_whisper_request(
+        audio_path=audio_path,
+        endpoint=endpoint,
+        response_format=response_format,
+        language=language,
+        api_key=api_key,
+    )
+
+    if response.ok:
+        payload = response.json()
+        return _parse_response(payload, fallback_language=language)
+
+    if response.status_code == 400:
+        fallback_response = _post_whisper_request(
+            audio_path=audio_path,
+            endpoint=endpoint,
+            response_format=response_format,
+            language=None,
+            api_key=api_key,
+        )
+        if fallback_response.ok:
+            payload = fallback_response.json()
+            return _parse_response(payload, fallback_language=language)
+
+    response.raise_for_status()
+    raise RuntimeError("Failed to call Whisper API")
+
+
+@retryable("openai_stt")
+def _post_whisper_request(
+    *,
+    audio_path: Path,
+    endpoint: str,
+    response_format: str,
+    language: str | None,
+    api_key: str,
+) -> requests.Response:
     with audio_path.open("rb") as audio_file:
         files = {
             "file": (audio_path.name, audio_file, "application/octet-stream"),
@@ -96,8 +135,9 @@ def _request_whisper(
         data = {
             "model": WHISPER_MODEL,
             "response_format": response_format,
-            "language": language,
         }
+        if language is not None:
+            data["language"] = language
         headers = {
             "Authorization": f"Bearer {api_key}",
         }
@@ -109,35 +149,13 @@ def _request_whisper(
             timeout=120,
         )
 
-    if response.ok:
-        payload = response.json()
-        return _parse_response(payload, fallback_language=language)
-
-    if response.status_code == 400:
-        with audio_path.open("rb") as audio_file:
-            files = {
-                "file": (audio_path.name, audio_file, "application/octet-stream"),
-            }
-            data = {
-                "model": WHISPER_MODEL,
-                "response_format": response_format,
-            }
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-            }
-            fallback_response = requests.post(
-                f"{OPENAI_API_BASE}/{endpoint}",
-                headers=headers,
-                data=data,
-                files=files,
-                timeout=120,
-            )
-        if fallback_response.ok:
-            payload = fallback_response.json()
-            return _parse_response(payload, fallback_language=language)
-
-    response.raise_for_status()
-    raise RuntimeError("Failed to call Whisper API")
+    if response.status_code == 429 or response.status_code >= 500:
+        raise ExternalAPIError(
+            "openai_stt",
+            f"OpenAI STT error {response.status_code}: {response.text}",
+            status_code=response.status_code,
+        )
+    return response
 
 
 def _parse_response(payload: dict[str, Any], *, fallback_language: str) -> STTResult:

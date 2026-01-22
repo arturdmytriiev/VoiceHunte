@@ -7,6 +7,18 @@ class Settings(BaseSettings):
     app_name: str = "VoiceHunte"
     environment: str = "local"
     log_level: str = "INFO"
+    max_turns: int = 8
+    db_auto_create: bool = True
+    retry_max_attempts: int = 4
+    retry_backoff_initial: float = 0.5
+    retry_backoff_max: float = 8.0
+    twilio_rate_limit: str = "30/minute"
+    admin_rate_limit: str = "20/minute"
+    sentry_dsn: str | None = None
+    sentry_environment: str | None = None
+    otel_exporter_otlp_endpoint: str | None = None
+    otel_service_name: str = "voicehunte"
+    enable_recording: bool = True
 
     postgres_dsn: str = "postgresql+psycopg://voicehunte:voicehunte@localhost:5432/voicehunte"
     postgres_pool_size: int = 5
