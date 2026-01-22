@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Literal
 
 import structlog
-from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.agent import CallState, Intent, run_agent
@@ -248,6 +248,23 @@ async def twilio_status(request: Request) -> Response:
     return await handle_call_status(request)
 
 
+@app.get("/twilio/tts/{call_id}/{filename}")
+async def twilio_tts(call_id: str, filename: str) -> Response:
+    """
+    Serve generated TTS audio for Twilio <Play>.
+    """
+    tts_path = Path("storage/tts") / call_id / filename
+    if not tts_path.exists():
+        raise HTTPException(status_code=404, detail="TTS file not found")
+    return FileResponse(tts_path, media_type="audio/mpeg")
+
+
 @app.on_event("startup")
 async def startup() -> None:
     logging.getLogger(__name__).info("service_started")
+    if not settings.twilio_account_sid:
+        logging.getLogger(__name__).warning("twilio_account_sid_missing")
+    if not settings.twilio_auth_token:
+        logging.getLogger(__name__).warning("twilio_auth_token_missing")
+    if not settings.twilio_phone_number:
+        logging.getLogger(__name__).warning("twilio_phone_number_missing")

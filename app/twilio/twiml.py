@@ -3,7 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 
-def create_twiml_response(*, say: str | None = None, play: str | None = None, gather: dict[str, Any] | None = None, hangup: bool = False) -> str:
+def create_twiml_response(
+    *,
+    say: str | None = None,
+    play: str | None = None,
+    gather: dict[str, Any] | None = None,
+    hangup: bool = False,
+) -> str:
     """
     Create TwiML response for Twilio.
 
@@ -57,9 +63,19 @@ def _build_gather(config: dict[str, Any]) -> str:
     ]
 
     say_text = config.get("say")
-    if say_text:
-        voice = config.get("voice", "Polly.Joanna")
-        return f'  <Gather {" ".join(attrs)}>\n    <Say voice="{voice}" language="{language}">{_escape_xml(say_text)}</Say>\n  </Gather>'
+    play_url = config.get("play")
+
+    if say_text or play_url:
+        parts = [f'  <Gather {" ".join(attrs)}>']
+        if say_text:
+            voice = config.get("voice", "Polly.Joanna")
+            parts.append(
+                f'    <Say voice="{voice}" language="{language}">{_escape_xml(say_text)}</Say>'
+            )
+        if play_url:
+            parts.append(f'    <Play>{_escape_xml(play_url)}</Play>')
+        parts.append("  </Gather>")
+        return "\n".join(parts)
 
     return f'  <Gather {" ".join(attrs)}/>'
 
@@ -106,3 +122,15 @@ def get_polly_voice(language: str) -> str:
     }
     lang_code = language[:2] if language else "en"
     return voice_map.get(lang_code, "Polly.Joanna")
+
+
+def get_twilio_language(language: str) -> str:
+    """Map language code to Twilio locale."""
+    lang_code = language[:2] if language else "en"
+    locale_map = {
+        "en": "en-US",
+        "ru": "ru-RU",
+        "uk": "uk-UA",
+        "sk": "sk-SK",
+    }
+    return locale_map.get(lang_code, "en-US")
