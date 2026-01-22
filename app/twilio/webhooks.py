@@ -11,7 +11,11 @@ from fastapi.responses import Response
 from app.agent import CallState, run_agent
 from app.db.conversations import ConversationStore
 from app.tts import tts_to_file
-from app.twilio.twiml import create_twiml_response, get_polly_voice
+from app.twilio.twiml import (
+    create_twiml_response,
+    get_polly_voice,
+    get_twilio_language,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -47,7 +51,7 @@ async def handle_incoming_call(request: Request) -> Response:
             "input": "speech",
             "action": "/twilio/voice",
             "method": "POST",
-            "language": "en-US",
+            "language": get_twilio_language(language),
             "speech_timeout": "auto",
             "say": "Hello! Welcome to our restaurant. How can I help you today?",
             "voice": get_polly_voice(language),
@@ -80,7 +84,7 @@ async def handle_voice_input(
                 "input": "speech",
                 "action": "/twilio/voice",
                 "method": "POST",
-                "language": "en-US",
+                "language": get_twilio_language("en"),
                 "speech_timeout": "auto",
                 "say": "I didn't catch that. Could you please repeat?",
             }
@@ -119,6 +123,7 @@ async def handle_voice_input(
     )
 
     detected_language = call_state.language or "en"
+    twilio_language = get_twilio_language(detected_language)
 
     # Check if we need more clarification
     needs_clarification = (
@@ -127,22 +132,35 @@ async def handle_voice_input(
     )
 
     if needs_clarification:
+        tts_text = answer_text
+    else:
+        tts_text = f"{answer_text}. Thank you for calling. Goodbye!"
+
+    tts_dir = Path("storage/tts") / CallSid
+    tts_dir.mkdir(parents=True, exist_ok=True)
+    tts_filename = f"turn_{turn_id}.mp3"
+    tts_path = tts_dir / tts_filename
+    tts_to_file(tts_text, str(tts_path))
+    base_url = str(request.base_url).rstrip("/")
+    tts_url = f"{base_url}/twilio/tts/{CallSid}/{tts_filename}"
+
+    if needs_clarification:
         # Continue conversation with gather
         twiml = create_twiml_response(
             gather={
                 "input": "speech",
                 "action": "/twilio/voice",
                 "method": "POST",
-                "language": f"{detected_language}-US" if detected_language == "en" else detected_language,
+                "language": twilio_language,
                 "speech_timeout": "auto",
-                "say": answer_text,
+                "play": tts_url,
                 "voice": get_polly_voice(detected_language),
             }
         )
     else:
         # Final response and hangup
         twiml = create_twiml_response(
-            say=f"{answer_text}. Thank you for calling. Goodbye!",
+            play=tts_url,
             hangup=True,
         )
 
