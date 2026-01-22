@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Margherita Pizza",
+    "description": "Classic pizza with tomato sauce, mozzarella, and fresh basil.",
+    "price": 8.5,
+    "category": "Pizza",
+    "allergens": ["dairy", "gluten"],
+    "tags": ["vegetarian", "classic"]
+  },
+  {
+    "name": "Pepperoni Pizza",
+    "description": "Spicy pepperoni with mozzarella and tomato sauce.",
+    "price": 9.5,
+    "category": "Pizza",
+    "allergens": ["dairy", "gluten"],
+    "tags": ["spicy", "popular"]
+  },
+  {
+    "name": "Caesar Salad",
+    "description": "Romaine lettuce with parmesan, croutons, and Caesar dressing.",
+    "price": 7.0,
+    "category": "Salads",
+    "allergens": ["dairy", "gluten", "egg"],
+    "tags": ["fresh", "light"]
+  },
+  {
+    "name": "Tomato Soup",
+    "description": "Creamy tomato soup with herbs.",
+    "price": 5.5,
+    "category": "Soups",
+    "allergens": ["dairy"],
+    "tags": ["vegetarian"]
+  },
+  {
+    "name": "Grilled Chicken Bowl",
+    "description": "Grilled chicken with quinoa, roasted овощи, and зелёный соус.",
+    "price": 11.0,
+    "category": "Bowls",
+    "tags": ["high-protein", "gluten-free"]
+  }
+]
