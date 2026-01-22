@@ -16,6 +16,8 @@ structlog = "^24.1.0"
 requests = "^2.31.0"
 sentence-transformers = "^2.6.1"
 psycopg = { version = "^3.1.18", extras = ["binary"] }
+twilio = "^9.0.0"
+python-multipart = "^0.0.6"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"

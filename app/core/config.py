@@ -13,5 +13,10 @@ class Settings(BaseSettings):
     qdrant_api_key: str | None = None
     openai_api_key: str | None = None
 
+    # Twilio settings
+    twilio_account_sid: str | None = None
+    twilio_auth_token: str | None = None
+    twilio_phone_number: str | None = None
+
 
 settings = Settings()
