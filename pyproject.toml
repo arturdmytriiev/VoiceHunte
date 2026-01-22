@@ -20,6 +20,9 @@ twilio = "^9.0.0"
 python-multipart = "^0.0.6"
 tenacity = "^8.2.3"
 slowapi = "^0.1.8"
+prometheus-fastapi-instrumentator = "^7.0.0"
+sentry-sdk = { version = "^2.0.0", extras = ["fastapi"] }
+alembic = "^1.13.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"

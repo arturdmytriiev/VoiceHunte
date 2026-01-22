@@ -9,6 +9,7 @@ def create_twiml_response(
     play: str | None = None,
     gather: dict[str, Any] | None = None,
     hangup: bool = False,
+    record: dict[str, Any] | None = None,
 ) -> str:
     """
     Create TwiML response for Twilio.
@@ -18,11 +19,15 @@ def create_twiml_response(
         play: URL of audio file to play
         gather: Configuration for gathering user input
         hangup: Whether to hangup after
+        record: Configuration for recording the call
 
     Returns:
         TwiML XML string
     """
     parts = ['<?xml version="1.0" encoding="UTF-8"?>', '<Response>']
+
+    if record:
+        parts.append(_build_record(record))
 
     if gather:
         parts.append(_build_gather(gather))
@@ -40,6 +45,25 @@ def create_twiml_response(
 
     parts.append('</Response>')
     return '\n'.join(parts)
+
+
+def _build_record(config: dict[str, Any]) -> str:
+    """Build <Record> element."""
+    recording_status_callback = config.get("recording_status_callback", "/twilio/recording-status")
+    recording_status_callback_method = config.get("recording_status_callback_method", "POST")
+    max_length = config.get("max_length", 3600)  # Default 1 hour
+    trim = config.get("trim", "trim-silence")
+    recording_channels = config.get("recording_channels", "mono")
+
+    attrs = [
+        f'recordingStatusCallback="{recording_status_callback}"',
+        f'recordingStatusCallbackMethod="{recording_status_callback_method}"',
+        f'maxLength="{max_length}"',
+        f'trim="{trim}"',
+        f'recordingChannels="{recording_channels}"',
+    ]
+
+    return f'  <Record {" ".join(attrs)}/>'
 
 
 def _build_gather(config: dict[str, Any]) -> str:

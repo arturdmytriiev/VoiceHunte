@@ -134,6 +134,219 @@ class ConversationStore:
     def _get_conn(self):
         return self.pool.connection()
 
+    def save_recording(
+        self,
+        *,
+        call_id: str,
+        recording_sid: str,
+        recording_url: str,
+        from_number: str | None = None,
+        to_number: str | None = None,
+    ) -> None:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO recordings (
+                        call_id,
+                        recording_sid,
+                        recording_url,
+                        from_number,
+                        to_number
+                    )
+                    VALUES (%(call_id)s, %(recording_sid)s, %(recording_url)s, %(from_number)s, %(to_number)s)
+                    ON CONFLICT (call_id)
+                    DO UPDATE SET
+                        recording_sid = EXCLUDED.recording_sid,
+                        recording_url = EXCLUDED.recording_url,
+                        updated_at = NOW()
+                    """,
+                    {
+                        "call_id": call_id,
+                        "recording_sid": recording_sid,
+                        "recording_url": recording_url,
+                        "from_number": from_number,
+                        "to_number": to_number,
+                    },
+                )
+            conn.commit()
+
+    def get_recording(self, call_id: str) -> dict[str, Any] | None:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        call_id,
+                        recording_sid,
+                        recording_url,
+                        from_number,
+                        to_number,
+                        created_at,
+                        updated_at
+                    FROM recordings
+                    WHERE call_id = %(call_id)s
+                    """,
+                    {"call_id": call_id},
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return row if row else None
+
+    def update_call_session(
+        self,
+        *,
+        call_id: str,
+        from_number: str | None = None,
+        to_number: str | None = None,
+        status: str | None = None,
+        ended_at: bool = False,
+    ) -> None:
+        """Update call session metadata."""
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                updates = []
+                params: dict[str, Any] = {"call_id": call_id}
+
+                if from_number is not None:
+                    updates.append("from_number = %(from_number)s")
+                    params["from_number"] = from_number
+
+                if to_number is not None:
+                    updates.append("to_number = %(to_number)s")
+                    params["to_number"] = to_number
+
+                if status is not None:
+                    updates.append("status = %(status)s")
+                    params["status"] = status
+
+                if ended_at:
+                    updates.append("ended_at = NOW()")
+
+                if updates:
+                    cur.execute(
+                        f"""
+                        UPDATE calls
+                        SET {", ".join(updates)}
+                        WHERE call_id = %(call_id)s
+                        """,
+                        params,
+                    )
+            conn.commit()
+
+    def get_call_session(self, call_id: str) -> dict[str, Any] | None:
+        """Get complete call session with all turns and recording."""
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                # Get call metadata
+                cur.execute(
+                    """
+                    SELECT
+                        c.call_id,
+                        c.started_at,
+                        c.ended_at,
+                        c.language,
+                        c.from_number,
+                        c.to_number,
+                        c.status,
+                        r.recording_sid,
+                        r.recording_url
+                    FROM calls c
+                    LEFT JOIN recordings r ON c.call_id = r.call_id
+                    WHERE c.call_id = %(call_id)s
+                    """,
+                    {"call_id": call_id},
+                )
+                call_row = cur.fetchone()
+                if not call_row:
+                    return None
+
+                # Get all turns for this call
+                cur.execute(
+                    """
+                    SELECT
+                        turn_id,
+                        user_text,
+                        intent,
+                        tool_calls,
+                        assistant_text,
+                        created_at
+                    FROM turns
+                    WHERE call_id = %(call_id)s
+                    ORDER BY turn_id
+                    """,
+                    {"call_id": call_id},
+                )
+                turns = cur.fetchall()
+
+            conn.commit()
+
+        # Build complete session
+        session = dict(call_row)
+        session["turns"] = [dict(turn) for turn in turns]
+
+        # Build transcript from turns
+        transcript_lines = []
+        for turn in turns:
+            if turn["user_text"]:
+                transcript_lines.append(f"User: {turn['user_text']}")
+            if turn["assistant_text"]:
+                transcript_lines.append(f"Assistant: {turn['assistant_text']}")
+        session["transcript"] = "\n".join(transcript_lines)
+
+        return session
+
+    def list_call_sessions(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        from_number: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List call sessions with optional filters."""
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                where_clauses = []
+                params: dict[str, Any] = {"limit": limit, "offset": offset}
+
+                if from_number:
+                    where_clauses.append("c.from_number = %(from_number)s")
+                    params["from_number"] = from_number
+
+                if status:
+                    where_clauses.append("c.status = %(status)s")
+                    params["status"] = status
+
+                where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
+
+                cur.execute(
+                    f"""
+                    SELECT
+                        c.call_id,
+                        c.started_at,
+                        c.ended_at,
+                        c.language,
+                        c.from_number,
+                        c.to_number,
+                        c.status,
+                        r.recording_url,
+                        COUNT(t.turn_id) as turn_count
+                    FROM calls c
+                    LEFT JOIN recordings r ON c.call_id = r.call_id
+                    LEFT JOIN turns t ON c.call_id = t.call_id
+                    WHERE {where_sql}
+                    GROUP BY c.call_id, r.recording_url
+                    ORDER BY c.started_at DESC
+                    LIMIT %(limit)s OFFSET %(offset)s
+                    """,
+                    params,
+                )
+                rows = cur.fetchall()
+            conn.commit()
+
+        return [dict(row) for row in rows]
+
     def _ensure_tables(self) -> None:
         with self._get_conn() as conn:
             with conn.cursor() as cur:
@@ -142,7 +355,11 @@ class ConversationStore:
                     CREATE TABLE IF NOT EXISTS calls (
                         call_id TEXT PRIMARY KEY,
                         started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        language TEXT
+                        ended_at TIMESTAMPTZ,
+                        language TEXT,
+                        from_number TEXT,
+                        to_number TEXT,
+                        status TEXT DEFAULT 'active'
                     )
                     """
                 )
@@ -173,6 +390,19 @@ class ConversationStore:
                             REFERENCES turns(call_id, turn_id)
                             ON DELETE CASCADE,
                         CHECK (kind IN ('input', 'output'))
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS recordings (
+                        call_id TEXT PRIMARY KEY REFERENCES calls(call_id) ON DELETE CASCADE,
+                        recording_sid TEXT NOT NULL,
+                        recording_url TEXT NOT NULL,
+                        from_number TEXT,
+                        to_number TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
                     """
                 )

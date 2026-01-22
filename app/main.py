@@ -21,11 +21,13 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.agent import CallState, Intent, run_agent
 from app.core.config import settings
 from app.core.errors import ExternalAPIError
 from app.core.logging import call_id_ctx, configure_logging, request_id_ctx
+from app.core.sentry import init_sentry
 from app.db.conversations import ConversationStore
 from app.db.pool import close_pool, get_pool, init_pool
 from app.stt.whisper import SUPPORTED_LANGUAGES, transcribe
@@ -34,11 +36,13 @@ from app.twilio.models import sanitize_optional_payload, sanitize_text_payload
 from app.twilio.webhooks import (
     handle_call_status,
     handle_incoming_call,
+    handle_recording_status,
     handle_voice_input,
 )
 from app.twilio.twiml import create_twiml_response
 
 configure_logging(settings.log_level)
+init_sentry()
 logger = structlog.get_logger(__name__)
 
 
@@ -56,6 +60,19 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
 store = ConversationStore()
+
+# Prometheus metrics
+instrumentator = Instrumentator(
+    should_group_status_codes=False,
+    should_ignore_untemplated=True,
+    should_respect_env_var=True,
+    should_instrument_requests_inprogress=True,
+    excluded_handlers=["/metrics"],
+    env_var_name="ENABLE_METRICS",
+    inprogress_name="http_requests_inprogress",
+    inprogress_labels=True,
+)
+instrumentator.instrument(app)
 
 LanguageCode = Literal["sk", "en", "ru", "uk"]
 
@@ -198,6 +215,14 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 async def health() -> dict[str, str]:
     logger.info("health_check")
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def metrics() -> Response:
+    """Prometheus metrics endpoint."""
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 def _extract_reservation_id(state: CallState) -> int | None:
@@ -377,6 +402,15 @@ async def twilio_status(request: Request) -> Response:
     return await handle_call_status(request)
 
 
+@app.post("/twilio/recording-status")
+@limiter.limit(settings.twilio_rate_limit, key_func=_twilio_rate_key)
+async def twilio_recording_status(request: Request) -> Response:
+    """
+    Twilio webhook for recording status updates.
+    """
+    return await handle_recording_status(request)
+
+
 @app.get("/twilio/tts/{call_id}/{filename}")
 async def twilio_tts(call_id: str, filename: str) -> Response:
     """
@@ -386,6 +420,50 @@ async def twilio_tts(call_id: str, filename: str) -> Response:
     if not tts_path.exists():
         raise HTTPException(status_code=404, detail="TTS file not found")
     return FileResponse(tts_path, media_type="audio/mpeg")
+
+
+@app.get("/admin/recordings/{call_id}")
+@limiter.limit(settings.admin_rate_limit)
+async def get_recording(call_id: str) -> JSONResponse:
+    """
+    Get recording information for a specific call.
+    """
+    recording = store.get_recording(call_id)
+    if not recording:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    return JSONResponse(content=recording)
+
+
+@app.get("/admin/calls")
+@limiter.limit(settings.admin_rate_limit)
+async def list_calls(
+    limit: int = 50,
+    offset: int = 0,
+    from_number: str | None = None,
+    status: str | None = None,
+) -> JSONResponse:
+    """
+    List call sessions with pagination and filtering.
+    """
+    calls = store.list_call_sessions(
+        limit=min(limit, 100),
+        offset=offset,
+        from_number=from_number,
+        status=status,
+    )
+    return JSONResponse(content={"calls": calls, "limit": limit, "offset": offset})
+
+
+@app.get("/admin/calls/{call_id}")
+@limiter.limit(settings.admin_rate_limit)
+async def get_call(call_id: str) -> JSONResponse:
+    """
+    Get detailed information about a specific call session.
+    """
+    call_session = store.get_call_session(call_id)
+    if not call_session:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return JSONResponse(content=call_session)
 
 
 @app.get("/ready")
