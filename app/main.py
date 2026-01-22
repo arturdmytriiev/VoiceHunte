@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Literal
 
 import structlog
-from fastapi import FastAPI, File, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.agent import CallState, Intent, run_agent
@@ -18,6 +18,12 @@ from app.core.config import settings
 from app.core.logging import call_id_ctx, configure_logging, request_id_ctx
 from app.db.conversations import ConversationStore
 from app.stt.whisper import SUPPORTED_LANGUAGES, transcribe
+from app.tts import stream_tts
+from app.twilio.webhooks import (
+    handle_call_status,
+    handle_incoming_call,
+    handle_voice_input,
+)
 
 configure_logging(settings.log_level)
 logger = structlog.get_logger(__name__)
@@ -169,6 +175,77 @@ async def mvp_text(payload: TextRequest) -> MVPResponse:
         else None,
     )
     return _build_response(call_state, payload.text)
+
+
+class TTSRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+    voice: str = "alloy"
+    model: str = "tts-1"
+    response_format: str = "mp3"
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+
+
+@app.post("/tts/stream")
+async def tts_stream(payload: TTSRequest) -> StreamingResponse:
+    """
+    Stream TTS audio from OpenAI.
+    Returns audio in chunks for streaming playback.
+    """
+    try:
+        audio_stream = stream_tts(
+            payload.text,
+            voice=payload.voice,
+            model=payload.model,
+            response_format=payload.response_format,
+            speed=payload.speed,
+        )
+
+        media_type_map = {
+            "mp3": "audio/mpeg",
+            "opus": "audio/opus",
+            "aac": "audio/aac",
+            "flac": "audio/flac",
+            "wav": "audio/wav",
+            "pcm": "audio/pcm",
+        }
+        media_type = media_type_map.get(payload.response_format, "audio/mpeg")
+
+        return StreamingResponse(audio_stream, media_type=media_type)
+    except Exception as e:
+        logger.exception("tts_stream_failed", error=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"TTS generation failed: {str(e)}"},
+        )
+
+
+@app.post("/twilio/incoming")
+async def twilio_incoming(request: Request) -> Response:
+    """
+    Twilio webhook for incoming calls.
+    """
+    return await handle_incoming_call(request)
+
+
+@app.post("/twilio/voice")
+async def twilio_voice(
+    request: Request,
+    SpeechResult: str = Form(None),
+    CallSid: str = Form(...),
+    Confidence: float = Form(None),
+) -> Response:
+    """
+    Twilio webhook for voice input processing.
+    """
+    return await handle_voice_input(request, SpeechResult, CallSid, Confidence)
+
+
+@app.post("/twilio/status")
+async def twilio_status(request: Request) -> Response:
+    """
+    Twilio webhook for call status updates.
+    """
+    return await handle_call_status(request)
 
 
 @app.on_event("startup")
