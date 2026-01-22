@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+poetry.lock
+pytest_cache/
+.DS_Store
