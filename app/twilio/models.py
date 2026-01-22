@@ -102,6 +102,35 @@ class TwilioCallStatusPayload(BaseModel):
         return _sanitize_text(value, 32)
 
 
+class TwilioRecordingStatusPayload(BaseModel):
+    CallSid: str = Field(..., min_length=1, max_length=64)
+    RecordingSid: str = Field(..., min_length=1, max_length=64)
+    RecordingUrl: str = Field(..., min_length=1, max_length=512)
+    RecordingStatus: str = Field(..., min_length=1, max_length=32)
+    From: str | None = None
+    To: str | None = None
+
+    @field_validator("CallSid", "RecordingSid")
+    @classmethod
+    def validate_sid(cls, value: str) -> str:
+        return _sanitize_text(value, 64)
+
+    @field_validator("RecordingUrl")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        return _sanitize_text(value, 512)
+
+    @field_validator("RecordingStatus")
+    @classmethod
+    def validate_status(cls, value: str) -> str:
+        return _sanitize_text(value, 32)
+
+    @field_validator("From", "To")
+    @classmethod
+    def validate_phone(cls, value: str | None) -> str | None:
+        return _normalize_phone(value)
+
+
 def sanitize_text_payload(value: str, max_length: int = 4000) -> str:
     return _sanitize_text(value, max_length)
 

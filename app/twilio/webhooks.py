@@ -15,6 +15,7 @@ from app.tts import tts_to_file
 from app.twilio.models import (
     TwilioCallStatusPayload,
     TwilioIncomingCallPayload,
+    TwilioRecordingStatusPayload,
     TwilioVoicePayload,
 )
 from app.twilio.security import verify_twilio_signature
@@ -38,6 +39,8 @@ async def handle_incoming_call(request: Request) -> Response:
     Handle incoming Twilio call.
     This is the initial webhook when a call is received.
     """
+    from app.core.config import settings
+
     form_data = await request.form()
     if not verify_twilio_signature(request, form_data):
         twiml = create_twiml_response(say="We could not verify this request.")
@@ -63,10 +66,30 @@ async def handle_incoming_call(request: Request) -> Response:
         to_number=to_number,
     )
 
+    # Initialize call session in database
+    store.update_call_session(
+        call_id=call_sid,
+        from_number=from_number,
+        to_number=to_number,
+        status="in-progress",
+    )
+
     # Default to English, will be detected from speech
     language = "en"
 
+    base_url = str(request.base_url).rstrip("/")
+    record_config = None
+    if settings.enable_recording:
+        record_config = {
+            "recording_status_callback": f"{base_url}/twilio/recording-status",
+            "recording_status_callback_method": "POST",
+            "max_length": 3600,  # 1 hour max
+            "trim": "trim-silence",
+            "recording_channels": "mono",
+        }
+
     twiml = create_twiml_response(
+        record=record_config,
         gather={
             "input": "speech",
             "action": "/twilio/voice",
@@ -225,5 +248,59 @@ async def handle_call_status(request: Request) -> Response:
         call_sid=call_sid,
         status=call_status,
     )
+
+    # Update call session status
+    if call_status in ("completed", "failed", "busy", "no-answer", "canceled"):
+        store.update_call_session(
+            call_id=call_sid,
+            status=call_status,
+            ended_at=True,
+        )
+
+    return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+
+
+async def handle_recording_status(request: Request) -> Response:
+    """
+    Handle recording status updates from Twilio.
+    Called when a recording is completed.
+    """
+    form_data = await request.form()
+    if not verify_twilio_signature(request, form_data):
+        twiml = create_twiml_response(say="We could not verify this request.")
+        return Response(
+            content=twiml,
+            media_type="application/xml",
+            status_code=403,
+        )
+
+    try:
+        payload = TwilioRecordingStatusPayload.model_validate(form_data)
+    except ValidationError:
+        twiml = create_twiml_response(say="Invalid request.")
+        return Response(content=twiml, media_type="application/xml", status_code=422)
+
+    logger.info(
+        "recording_status_update",
+        call_sid=payload.CallSid,
+        recording_sid=payload.RecordingSid,
+        recording_status=payload.RecordingStatus,
+        recording_url=payload.RecordingUrl,
+    )
+
+    # Save recording information to database
+    if payload.RecordingStatus == "completed":
+        store.save_recording(
+            call_id=payload.CallSid,
+            recording_sid=payload.RecordingSid,
+            recording_url=payload.RecordingUrl,
+            from_number=payload.From,
+            to_number=payload.To,
+        )
+        logger.info(
+            "recording_saved",
+            call_sid=payload.CallSid,
+            recording_sid=payload.RecordingSid,
+        )
 
     return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
