@@ -1,46 +1,38 @@
 from __future__ import annotations
 
 import os
-import time
 from typing import Any
 
 import requests
 
+from app.core.errors import ExternalAPIError
+from app.core.retry import retryable
+
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 DEFAULT_TIMEOUT = float(os.getenv("QDRANT_TIMEOUT", "10"))
-DEFAULT_RETRIES = int(os.getenv("QDRANT_RETRIES", "3"))
-DEFAULT_BACKOFF = float(os.getenv("QDRANT_BACKOFF", "0.5"))
 
 
 class QdrantError(RuntimeError):
     pass
 
 
+@retryable("qdrant")
 def _request(
     method: str,
     path: str,
     *,
     json: dict[str, Any] | None = None,
     timeout: float = DEFAULT_TIMEOUT,
-    retries: int = DEFAULT_RETRIES,
 ) -> requests.Response:
     url = f"{QDRANT_URL}{path}"
-    last_error: Exception | None = None
-    for attempt in range(retries):
-        try:
-            response = requests.request(method, url, json=json, timeout=timeout)
-            if response.status_code >= 500:
-                raise QdrantError(f"Qdrant error {response.status_code}: {response.text}")
-            return response
-        except (requests.RequestException, QdrantError) as exc:
-            last_error = exc
-            if attempt < retries - 1:
-                time.sleep(DEFAULT_BACKOFF * (2**attempt))
-                continue
-            raise
-    if last_error:
-        raise last_error
-    raise QdrantError("Unexpected request failure")
+    response = requests.request(method, url, json=json, timeout=timeout)
+    if response.status_code == 429 or response.status_code >= 500:
+        raise ExternalAPIError(
+            "qdrant",
+            f"Qdrant error {response.status_code}: {response.text}",
+            status_code=response.status_code,
+        )
+    return response
 
 
 def create_collection_if_not_exists(

@@ -8,16 +8,23 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
+from urllib.parse import parse_qs
 
 import anyio
 import requests
 import structlog
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
 from app.agent import CallState, Intent, run_agent
 from app.core.config import settings
+from app.core.errors import ExternalAPIError
 from app.core.logging import call_id_ctx, configure_logging, request_id_ctx
 from app.db.conversations import ConversationStore
 from app.db.pool import close_pool, get_pool, init_pool
@@ -29,6 +36,7 @@ from app.twilio.webhooks import (
     handle_incoming_call,
     handle_voice_input,
 )
+from app.twilio.twiml import create_twiml_response
 
 configure_logging(settings.log_level)
 logger = structlog.get_logger(__name__)
@@ -44,6 +52,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
 store = ConversationStore()
 
 LanguageCode = Literal["sk", "en", "ru", "uk"]
@@ -73,27 +84,114 @@ class MVPResponse(BaseModel):
     reservation_id: int | None = None
 
 
+def _twilio_rate_key(request: Request) -> str:
+    from_number = getattr(request.state, "twilio_from", None)
+    if from_number:
+        return f"twilio:{from_number}"
+    return get_remote_address(request)
+
+
+def _is_twilio_request(request: Request) -> bool:
+    return request.url.path.startswith("/twilio/")
+
+
+def _twilio_error_response(message: str, status_code: int = 200) -> Response:
+    twiml = create_twiml_response(say=message)
+    return Response(content=twiml, media_type="application/xml", status_code=status_code)
+
+
+@app.middleware("http")
+async def capture_twilio_fields(request: Request, call_next):
+    if request.url.path.startswith("/twilio/") and request.method == "POST":
+        content_type = request.headers.get("content-type", "")
+        if content_type.startswith("application/x-www-form-urlencoded"):
+            body = await request.body()
+            parsed = parse_qs(body.decode("utf-8"))
+            request.state.twilio_from = parsed.get("From", [None])[0]
+            request.state.twilio_call_sid = parsed.get("CallSid", [None])[0]
+
+            async def receive() -> dict[str, object]:
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            request._receive = receive  # type: ignore[attr-defined]
+
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def add_request_context(request: Request, call_next):
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
-    call_id = request.headers.get("x-call-id") or str(uuid.uuid4())
+    call_id = (
+        request.headers.get("x-call-id")
+        or getattr(request.state, "twilio_call_sid", None)
+        or str(uuid.uuid4())
+    )
 
     request_id_token = request_id_ctx.set(request_id)
     call_id_token = call_id_ctx.set(call_id)
 
     try:
         response = await call_next(request)
-    except Exception as exc:  # noqa: BLE001 - intentional to capture all errors
-        logger.exception("request_failed", path=request.url.path)
+    finally:
         request_id_ctx.reset(request_id_token)
         call_id_ctx.reset(call_id_token)
-        return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
     response.headers["x-request-id"] = request_id
     response.headers["x-call-id"] = call_id
-    request_id_ctx.reset(request_id_token)
-    call_id_ctx.reset(call_id_token)
     return response
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request: Request, exc: RequestValidationError):
+    logger.warning("request_validation_failed", path=request.url.path, error=str(exc))
+    if _is_twilio_request(request):
+        return _twilio_error_response("Извините, произошла ошибка. Попробуйте позже.")
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+
+@app.exception_handler(ValidationError)
+async def pydantic_validation_handler(request: Request, exc: ValidationError):
+    logger.warning("pydantic_validation_failed", path=request.url.path, error=str(exc))
+    if _is_twilio_request(request):
+        return _twilio_error_response("Извините, произошла ошибка. Попробуйте позже.")
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+
+@app.exception_handler(ExternalAPIError)
+async def external_api_handler(request: Request, exc: ExternalAPIError):
+    logger.warning(
+        "external_api_failed",
+        path=request.url.path,
+        service=exc.service,
+        status_code=exc.status_code,
+    )
+    if _is_twilio_request(request):
+        return _twilio_error_response("Извините, произошла ошибка. Попробуйте позже.")
+    return JSONResponse(
+        status_code=503,
+        content={"detail": f"Upstream {exc.service} error"},
+    )
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    logger.warning("rate_limit_exceeded", path=request.url.path)
+    if _is_twilio_request(request):
+        return _twilio_error_response(
+            "Слишком много запросов. Попробуйте позже.", status_code=429
+        )
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Rate limit exceeded. Please slow down."},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("unhandled_exception", path=request.url.path)
+    if _is_twilio_request(request):
+        return _twilio_error_response("Извините, произошла ошибка. Попробуйте позже.")
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 
 @app.get("/health")
@@ -125,6 +223,7 @@ def _serialize_tool_calls(state: CallState) -> list[dict[str, object]]:
 
 
 @app.post("/mvp/audio", response_model=MVPResponse)
+@limiter.limit(settings.admin_rate_limit)
 async def mvp_audio(
     file: UploadFile = File(...),
     language: LanguageCode = "en",
@@ -181,6 +280,7 @@ async def mvp_audio(
 
 
 @app.post("/mvp/text", response_model=MVPResponse)
+@limiter.limit(settings.admin_rate_limit)
 async def mvp_text(payload: TextRequest) -> MVPResponse:
     resolved_call_id = payload.call_id or call_id_ctx.get() or str(uuid.uuid4())
     call_state = CallState(
@@ -216,6 +316,7 @@ class TTSRequest(BaseModel):
 
 
 @app.post("/tts/stream")
+@limiter.limit(settings.admin_rate_limit)
 async def tts_stream(payload: TTSRequest) -> StreamingResponse:
     """
     Stream TTS audio from OpenAI.
@@ -250,6 +351,7 @@ async def tts_stream(payload: TTSRequest) -> StreamingResponse:
 
 
 @app.post("/twilio/incoming")
+@limiter.limit(settings.twilio_rate_limit, key_func=_twilio_rate_key)
 async def twilio_incoming(request: Request) -> Response:
     """
     Twilio webhook for incoming calls.
@@ -258,6 +360,7 @@ async def twilio_incoming(request: Request) -> Response:
 
 
 @app.post("/twilio/voice")
+@limiter.limit(settings.twilio_rate_limit, key_func=_twilio_rate_key)
 async def twilio_voice(request: Request) -> Response:
     """
     Twilio webhook for voice input processing.
@@ -266,6 +369,7 @@ async def twilio_voice(request: Request) -> Response:
 
 
 @app.post("/twilio/status")
+@limiter.limit(settings.twilio_rate_limit, key_func=_twilio_rate_key)
 async def twilio_status(request: Request) -> Response:
     """
     Twilio webhook for call status updates.

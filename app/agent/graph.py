@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Callable
 
 from app.agent.models import Intent
+from app.core.config import settings
 from app.agent.nodes.intent import classify_intent_and_entities
 from app.agent.nodes.respond import respond
 from app.agent.nodes.tools_crm import handle_crm_tools
@@ -21,7 +22,7 @@ def _ensure_history(state: CallState) -> None:
 def run_agent(
     call_state: CallState,
     llm: Callable[[str], str] | None = None,
-    max_turns: int = 2,
+    max_turns: int | None = None,
 ) -> CallState:
     _ensure_history(call_state)
 
@@ -29,8 +30,9 @@ def run_agent(
     if not user_messages:
         return call_state
 
+    resolved_max_turns = max_turns or settings.max_turns
     turns = 0
-    start_index = max(0, len(user_messages) - max_turns)
+    start_index = max(0, len(user_messages) - resolved_max_turns)
     for message in user_messages[start_index:]:
         turns += 1
         call_state.last_user_text = message.text

@@ -5,6 +5,8 @@ from typing import Iterator
 import requests
 
 from app.core.config import settings
+from app.core.errors import ExternalAPIError
+from app.core.retry import retryable
 
 OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
 DEFAULT_MODEL = "tts-1"
@@ -63,18 +65,34 @@ def stream_tts(
         "speed": speed,
     }
 
-    with requests.post(
-        OPENAI_TTS_URL,
-        headers=headers,
-        json=payload,
-        stream=True,
-        timeout=60,
-    ) as response:
+    with _post_tts_request(headers=headers, payload=payload) as response:
         response.raise_for_status()
 
         for chunk in response.iter_content(chunk_size=4096):
             if chunk:
                 yield chunk
+
+
+@retryable("openai_tts")
+def _post_tts_request(
+    *,
+    headers: dict[str, str],
+    payload: dict[str, object],
+) -> requests.Response:
+    response = requests.post(
+        OPENAI_TTS_URL,
+        headers=headers,
+        json=payload,
+        stream=True,
+        timeout=60,
+    )
+    if response.status_code == 429 or response.status_code >= 500:
+        raise ExternalAPIError(
+            "openai_tts",
+            f"OpenAI TTS error {response.status_code}: {response.text}",
+            status_code=response.status_code,
+        )
+    return response
 
 
 def tts_to_file(
