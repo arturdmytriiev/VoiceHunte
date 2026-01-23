@@ -23,6 +23,7 @@ slowapi = "^0.1.8"
 prometheus-fastapi-instrumentator = "^7.0.0"
 sentry-sdk = { version = "^2.0.0", extras = ["fastapi"] }
 alembic = "^1.13.0"
+psycopg-pool = "^3.3.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
