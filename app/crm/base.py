@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime as DateTime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 class ReservationCreate(BaseModel):
     name: str
-    datetime: datetime
+    datetime: DateTime
     people: int = Field(..., ge=1)
     phone: str | None = None
     notes: str | None = None
@@ -17,7 +17,7 @@ class ReservationCreate(BaseModel):
 
 class ReservationUpdate(BaseModel):
     name: str | None = None
-    datetime: datetime | None = None
+    datetime: DateTime | None = None
     people: int | None = Field(default=None, ge=1)
     phone: str | None = None
     notes: str | None = None
@@ -26,7 +26,7 @@ class ReservationUpdate(BaseModel):
 class ReservationRecord(BaseModel):
     reservation_id: int
     name: str
-    datetime: datetime
+    datetime: DateTime
     people: int
     phone: str | None = None
     notes: str | None = None
@@ -41,7 +41,7 @@ class CustomerPreferences(BaseModel):
 class CustomerPreferencesRecord(BaseModel):
     customer_key: str
     preferences: dict[str, Any]
-    updated_at: datetime
+    updated_at: DateTime
 
 
 class CRMAdapter(ABC):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime as DateTime
 from enum import Enum
 from typing import Any
 
@@ -22,7 +22,7 @@ class IntentResult(BaseModel):
 
 class ReservationRequest(BaseModel):
     name: str | None = None
-    datetime: datetime | None = None
+    datetime: DateTime | None = None
     people: int | None = Field(default=None, ge=1)
     reservation_id: int | None = None
 
