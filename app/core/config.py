@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     qdrant_api_key: str | None = None
     openai_api_key: str | None = None
 
+    # LLM Intent Classification settings
+    llm_intent_model: str = "gpt-4o-mini"
+    llm_intent_enabled: bool = True
+
     # Twilio settings
     twilio_account_sid: str | None = None
     twilio_auth_token: str | None = None
