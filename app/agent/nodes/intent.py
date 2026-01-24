@@ -5,9 +5,13 @@ import re
 from datetime import datetime
 from typing import Callable
 
+import structlog
 from pydantic import BaseModel, ValidationError
 
 from app.agent.models import Intent, ReservationRequest
+from app.core.config import settings
+
+logger = structlog.get_logger(__name__)
 
 
 class IntentExtraction(BaseModel):
@@ -98,12 +102,13 @@ def _extract_reservation_id(text: str) -> int | None:
 
 def _fallback_intent(text: str) -> Intent:
     lowered = text.lower()
-    if re.search(r"(book|reserve|reservation|заброн|брон|rezerv|rezer)", lowered):
-        return Intent.create_reservation
+    # Check cancel first (before create) to handle "cancel booking/reservation"
+    if re.search(r"(cancel|отмен|скас|zruš)", lowered):
+        return Intent.cancel_reservation
     if re.search(r"(change|update|move|измен|перен|змін|zmeni|upravi)", lowered):
         return Intent.update_reservation
-    if re.search(r"(cancel|отмен|скас|zruš|cancel)", lowered):
-        return Intent.cancel_reservation
+    if re.search(r"(book|reserve|reservation|заброн|брон|rezerv|rezer)", lowered):
+        return Intent.create_reservation
     if re.search(r"(menu|меню|страв|jedlo|jedálny|ponuka)", lowered):
         return Intent.menu_question
     if re.search(r"(hours|open|close|работ|відкрит|otvár|hodin|час)", lowered):
@@ -111,7 +116,8 @@ def _fallback_intent(text: str) -> Intent:
     return Intent.generic
 
 
-def _fallback_extract(text: str, language: str | None) -> IntentExtraction:
+def _regex_fallback_extract(text: str, language: str | None) -> IntentExtraction:
+    """Extract intent and entities using regex patterns (ultimate fallback)."""
     detected_language = language or detect_language(text)
     entities = ReservationRequest(
         name=_extract_name(text),
@@ -130,17 +136,78 @@ def _fallback_extract(text: str, language: str | None) -> IntentExtraction:
     )
 
 
+def _llm_classify(text: str, language: str | None) -> IntentExtraction:
+    """Classify intent using OpenAI LLM."""
+    from app.llm.openai_chat import chat_completion
+
+    prompt = build_intent_prompt(text, language)
+    raw = chat_completion(prompt, temperature=0.0, max_tokens=256)
+
+    try:
+        raw_stripped = raw.strip()
+        if raw_stripped.startswith("```"):
+            lines = raw_stripped.split("\n")
+            json_lines = []
+            in_json = False
+            for line in lines:
+                if line.startswith("```") and not in_json:
+                    in_json = True
+                    continue
+                if line.startswith("```") and in_json:
+                    break
+                if in_json:
+                    json_lines.append(line)
+            raw_stripped = "\n".join(json_lines)
+
+        payload = json.loads(raw_stripped)
+        return IntentExtraction.model_validate(payload)
+    except (json.JSONDecodeError, ValidationError) as e:
+        logger.warning(
+            "llm_classification_parse_error",
+            error=str(e),
+            raw_response=raw[:500],
+        )
+        raise
+
+
 def classify_intent_and_entities(
     text: str,
     language: str | None = None,
     llm: Callable[[str], str] | None = None,
+    use_llm_fallback: bool = True,
 ) -> IntentExtraction:
-    if llm is None:
-        return _fallback_extract(text, language)
-    prompt = build_intent_prompt(text, language)
-    raw = llm(prompt)
-    try:
-        payload = json.loads(raw)
-        return IntentExtraction.model_validate(payload)
-    except (json.JSONDecodeError, ValidationError):
-        return _fallback_extract(text, language)
+    """
+    Classify intent and extract entities from user text.
+
+    Args:
+        text: User input text
+        language: Language hint (auto-detected if not provided)
+        llm: Optional custom LLM callable (for testing or custom models)
+        use_llm_fallback: If True, use OpenAI LLM when no custom llm is provided
+                         and OPENAI_API_KEY is configured. Falls back to regex
+                         if LLM fails or is not available.
+
+    Returns:
+        IntentExtraction with intent, entities, and language
+    """
+    if llm is not None:
+        prompt = build_intent_prompt(text, language)
+        raw = llm(prompt)
+        try:
+            payload = json.loads(raw)
+            return IntentExtraction.model_validate(payload)
+        except (json.JSONDecodeError, ValidationError):
+            logger.warning("custom_llm_parse_error", raw_response=raw[:500])
+            return _regex_fallback_extract(text, language)
+
+    if use_llm_fallback and settings.llm_intent_enabled and settings.openai_api_key:
+        try:
+            return _llm_classify(text, language)
+        except Exception as e:
+            logger.warning(
+                "llm_classification_failed_using_regex",
+                error=str(e),
+            )
+            return _regex_fallback_extract(text, language)
+
+    return _regex_fallback_extract(text, language)
