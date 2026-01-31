@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import logging
 import os
 import shutil
 import tempfile
 import uuid
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs
@@ -48,6 +48,13 @@ logger = structlog.get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("service_started")
+    if not settings.twilio_account_sid:
+        logger.warning("twilio_account_sid_missing")
+    if not settings.twilio_auth_token:
+        logger.warning("twilio_auth_token_missing")
+    if not settings.twilio_phone_number:
+        logger.warning("twilio_phone_number_missing")
     init_pool()
     try:
         yield
@@ -56,6 +63,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+# NOTE: slowapi uses in-memory storage by default. Rate limits are NOT shared
+# across multiple workers. Run with a single uvicorn worker, or switch to a
+# Redis-backed storage (e.g. slowapi + limits[redis]) for multi-worker setups.
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
@@ -273,7 +283,9 @@ async def mvp_audio(
     shutil.copy(temp_path, audio_path)
 
     try:
-        stt_result = transcribe(temp_path, language=language, mode="transcribe")
+        stt_result = await anyio.to_thread.run_sync(
+            partial(transcribe, temp_path, language=language, mode="transcribe")
+        )
     finally:
         os.unlink(temp_path)
 
@@ -282,24 +294,30 @@ async def mvp_audio(
         language=stt_result.language or language,
         last_user_text=stt_result.text,
     )
-    call_state = run_agent(call_state)
+    call_state = await anyio.to_thread.run_sync(partial(run_agent, call_state))
 
-    store.create_turn(
-        call_id=resolved_call_id,
-        language=call_state.language,
-        user_text=stt_result.text,
-        intent=call_state.intent.value if call_state.intent else None,
-        tool_calls=_serialize_tool_calls(call_state),
-        assistant_text=call_state.final_answer.answer_text
-        if call_state.final_answer
-        else None,
-        turn_id=turn_id,
+    await anyio.to_thread.run_sync(
+        partial(
+            store.create_turn,
+            call_id=resolved_call_id,
+            language=call_state.language,
+            user_text=stt_result.text,
+            intent=call_state.intent.value if call_state.intent else None,
+            tool_calls=_serialize_tool_calls(call_state),
+            assistant_text=call_state.final_answer.answer_text
+            if call_state.final_answer
+            else None,
+            turn_id=turn_id,
+        )
     )
-    store.record_audio(
-        call_id=resolved_call_id,
-        turn_id=turn_id,
-        path=str(audio_path),
-        kind="input",
+    await anyio.to_thread.run_sync(
+        partial(
+            store.record_audio,
+            call_id=resolved_call_id,
+            turn_id=turn_id,
+            path=str(audio_path),
+            kind="input",
+        )
     )
     return _build_response(call_state, stt_result.text)
 
@@ -313,16 +331,19 @@ async def mvp_text(payload: TextRequest) -> MVPResponse:
         language=payload.language,
         last_user_text=payload.text,
     )
-    call_state = run_agent(call_state)
-    store.create_turn(
-        call_id=resolved_call_id,
-        language=call_state.language,
-        user_text=payload.text,
-        intent=call_state.intent.value if call_state.intent else None,
-        tool_calls=_serialize_tool_calls(call_state),
-        assistant_text=call_state.final_answer.answer_text
-        if call_state.final_answer
-        else None,
+    call_state = await anyio.to_thread.run_sync(partial(run_agent, call_state))
+    await anyio.to_thread.run_sync(
+        partial(
+            store.create_turn,
+            call_id=resolved_call_id,
+            language=call_state.language,
+            user_text=payload.text,
+            intent=call_state.intent.value if call_state.intent else None,
+            tool_calls=_serialize_tool_calls(call_state),
+            assistant_text=call_state.final_answer.answer_text
+            if call_state.final_answer
+            else None,
+        )
     )
     return _build_response(call_state, payload.text)
 
@@ -338,6 +359,21 @@ class TTSRequest(BaseModel):
     @classmethod
     def validate_text(cls, value: str) -> str:
         return sanitize_text_payload(value, max_length=4000)
+
+
+async def _async_iter_chunks(sync_iterator):
+    """Wrap a sync iterator to yield chunks without blocking the event loop."""
+    def _next():
+        try:
+            return next(sync_iterator)
+        except StopIteration:
+            return None
+
+    while True:
+        chunk = await anyio.to_thread.run_sync(_next)
+        if chunk is None:
+            break
+        yield chunk
 
 
 @app.post("/tts/stream")
@@ -366,12 +402,12 @@ async def tts_stream(payload: TTSRequest) -> StreamingResponse:
         }
         media_type = media_type_map.get(payload.response_format, "audio/mpeg")
 
-        return StreamingResponse(audio_stream, media_type=media_type)
+        return StreamingResponse(_async_iter_chunks(audio_stream), media_type=media_type)
     except Exception as e:
         logger.exception("tts_stream_failed", error=str(e))
         return JSONResponse(
             status_code=500,
-            content={"detail": f"TTS generation failed: {str(e)}"},
+            content={"detail": "TTS generation failed"},
         )
 
 
@@ -416,7 +452,10 @@ async def twilio_tts(call_id: str, filename: str) -> Response:
     """
     Serve generated TTS audio for Twilio <Play>.
     """
-    tts_path = Path("storage/tts") / call_id / filename
+    base_dir = Path("storage/tts").resolve()
+    tts_path = (base_dir / call_id / filename).resolve()
+    if not tts_path.is_relative_to(base_dir):
+        raise HTTPException(status_code=400, detail="Invalid path")
     if not tts_path.exists():
         raise HTTPException(status_code=404, detail="TTS file not found")
     return FileResponse(tts_path, media_type="audio/mpeg")
@@ -514,12 +553,4 @@ async def ready() -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"status": overall, "checks": checks})
 
 
-@app.on_event("startup")
-async def startup() -> None:
-    logging.getLogger(__name__).info("service_started")
-    if not settings.twilio_account_sid:
-        logging.getLogger(__name__).warning("twilio_account_sid_missing")
-    if not settings.twilio_auth_token:
-        logging.getLogger(__name__).warning("twilio_auth_token_missing")
-    if not settings.twilio_phone_number:
-        logging.getLogger(__name__).warning("twilio_phone_number_missing")
+
