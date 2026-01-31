@@ -9,10 +9,10 @@ from app.core.errors import ExternalAPIError
 from app.core.retry import retryable
 
 OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
-DEFAULT_MODEL = "tts-1"
+DEFAULT_MODEL = "gpt-4o-mini-tts"
 DEFAULT_VOICE = "alloy"
 SUPPORTED_VOICES = {"alloy", "echo", "fable", "onyx", "nova", "shimmer"}
-SUPPORTED_MODELS = {"tts-1", "tts-1-hd"}
+SUPPORTED_MODELS = {"tts-1", "tts-1-hd", "gpt-4o-mini-tts"}
 SUPPORTED_FORMATS = {"mp3", "opus", "aac", "flac", "wav", "pcm"}
 
 

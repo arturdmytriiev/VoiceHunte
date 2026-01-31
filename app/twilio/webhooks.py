@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import uuid
+from functools import partial
 from pathlib import Path
 
+import anyio
 import structlog
 from fastapi import Request
 from fastapi.responses import Response
@@ -67,11 +69,14 @@ async def handle_incoming_call(request: Request) -> Response:
     )
 
     # Initialize call session in database
-    store.update_call_session(
-        call_id=call_sid,
-        from_number=from_number,
-        to_number=to_number,
-        status="in-progress",
+    await anyio.to_thread.run_sync(
+        partial(
+            store.update_call_session,
+            call_id=call_sid,
+            from_number=from_number,
+            to_number=to_number,
+            status="in-progress",
+        )
     )
 
     # Default to English, will be detected from speech
@@ -152,22 +157,27 @@ async def handle_voice_input(
         language="en",  # Will be detected by agent
         last_user_text=payload.SpeechResult,
     )
-    call_state = run_agent(call_state)
+    call_state = await anyio.to_thread.run_sync(partial(run_agent, call_state))
 
     # Get turn ID
-    turn_id = store.next_turn_id(payload.CallSid)
+    turn_id = await anyio.to_thread.run_sync(
+        partial(store.next_turn_id, payload.CallSid)
+    )
 
     # Store in database
-    store.create_turn(
-        call_id=payload.CallSid,
-        language=call_state.language,
-        user_text=payload.SpeechResult,
-        intent=call_state.intent.value if call_state.intent else None,
-        tool_calls=_serialize_tool_calls(call_state),
-        assistant_text=call_state.final_answer.answer_text
-        if call_state.final_answer
-        else None,
-        turn_id=turn_id,
+    await anyio.to_thread.run_sync(
+        partial(
+            store.create_turn,
+            call_id=payload.CallSid,
+            language=call_state.language,
+            user_text=payload.SpeechResult,
+            intent=call_state.intent.value if call_state.intent else None,
+            tool_calls=_serialize_tool_calls(call_state),
+            assistant_text=call_state.final_answer.answer_text
+            if call_state.final_answer
+            else None,
+            turn_id=turn_id,
+        )
     )
 
     # Generate response
@@ -195,7 +205,7 @@ async def handle_voice_input(
     tts_dir.mkdir(parents=True, exist_ok=True)
     tts_filename = f"turn_{turn_id}.mp3"
     tts_path = tts_dir / tts_filename
-    tts_to_file(tts_text, str(tts_path))
+    await anyio.to_thread.run_sync(partial(tts_to_file, tts_text, str(tts_path)))
     base_url = str(request.base_url).rstrip("/")
     tts_url = f"{base_url}/twilio/tts/{payload.CallSid}/{tts_filename}"
 
@@ -251,10 +261,13 @@ async def handle_call_status(request: Request) -> Response:
 
     # Update call session status
     if call_status in ("completed", "failed", "busy", "no-answer", "canceled"):
-        store.update_call_session(
-            call_id=call_sid,
-            status=call_status,
-            ended_at=True,
+        await anyio.to_thread.run_sync(
+            partial(
+                store.update_call_session,
+                call_id=call_sid,
+                status=call_status,
+                ended_at=True,
+            )
         )
 
     return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
@@ -290,12 +303,15 @@ async def handle_recording_status(request: Request) -> Response:
 
     # Save recording information to database
     if payload.RecordingStatus == "completed":
-        store.save_recording(
-            call_id=payload.CallSid,
-            recording_sid=payload.RecordingSid,
-            recording_url=payload.RecordingUrl,
-            from_number=payload.From,
-            to_number=payload.To,
+        await anyio.to_thread.run_sync(
+            partial(
+                store.save_recording,
+                call_id=payload.CallSid,
+                recording_sid=payload.RecordingSid,
+                recording_url=payload.RecordingUrl,
+                from_number=payload.From,
+                to_number=payload.To,
+            )
         )
         logger.info(
             "recording_saved",

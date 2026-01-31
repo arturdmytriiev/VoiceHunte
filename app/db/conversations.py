@@ -17,20 +17,32 @@ class ConversationStore:
         pool: ConnectionPool | None = None,
     ) -> None:
         self.dsn = dsn or settings.postgres_dsn
-        if pool is not None:
-            self.pool = pool
-        elif dsn is not None:
-            self.pool = ConnectionPool(
+        self._pool: ConnectionPool | None = pool
+        self._use_shared_pool = pool is None and dsn is None
+        self._tables_ensured = False
+        if dsn is not None and pool is None:
+            self._pool = ConnectionPool(
                 conninfo=dsn,
                 min_size=1,
                 max_size=1,
                 kwargs={"row_factory": dict_row},
                 check=ConnectionPool.check_connection,
             )
-        else:
-            self.pool = get_pool()
-        if settings.db_auto_create:
+        if self._pool is not None and settings.db_auto_create:
             self._ensure_tables()
+            self._tables_ensured = True
+
+    @property
+    def pool(self) -> ConnectionPool:
+        if self._pool is None:
+            if self._use_shared_pool:
+                self._pool = get_pool()
+            else:
+                raise RuntimeError("Database pool not initialized")
+        if settings.db_auto_create and not self._tables_ensured:
+            self._ensure_tables()
+            self._tables_ensured = True
+        return self._pool
 
     def create_turn(
         self,
